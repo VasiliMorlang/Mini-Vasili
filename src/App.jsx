@@ -98,7 +98,7 @@ const loadEntries = () => {
   catch { return []; }
 };
 
-export default function Mini-Vasili() {
+export default function MiniVasili() {
   const [view, setView]         = useState("chat");
   const [entries, setEntries]   = useState(() => loadEntries());
   const [title, setTitle]       = useState("");

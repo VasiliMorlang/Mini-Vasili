@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 const STORAGE_KEY = "firmenbot-kb-v1";
+const API_KEY = import.meta.env.VITE_GROQ_API_KEY || "";
+
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
 
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');

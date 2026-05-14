@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import mammoth from "mammoth";
-import * as XLSX from "xlsx";
 
 const STORAGE_KEY = "firmenbot-kb-v1";
-const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`;
+const API_KEY = import.meta.env.VITE_GROQ_API_KEY || "";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
 
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
@@ -29,14 +27,12 @@ const CSS = `
   .setup-card h2 { font-size: 20px; font-weight: 800; color: #0c1628; margin-bottom: 12px; }
   .setup-card p { font-size: 14px; color: #64748b; line-height: 1.8; }
   .setup-card a { color: #3b82f6; text-decoration: none; font-weight: 600; }
-  .setup-card a:hover { text-decoration: underline; }
   .setup-code { display: inline-block; background: #f1f5f9; padding: 2px 8px; border-radius: 5px; font-family: monospace; font-size: 13px; color: #0c1628; }
   .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #f0f4f8; }
   .admin { flex: 1; overflow-y: auto; padding: 28px 30px; display: flex; flex-direction: column; gap: 22px; }
   .page-head h2 { font-size: 20px; font-weight: 800; color: #0c1628; letter-spacing: -0.4px; }
   .page-head p { font-size: 13px; color: #64748b; margin-top: 4px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
   .card { background: white; border-radius: 12px; padding: 22px; box-shadow: 0 1px 4px rgba(0,0,0,0.07); }
   .card-title { font-size: 11.5px; font-weight: 700; color: #334155; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.8px; }
   .fg { margin-bottom: 12px; }
@@ -98,20 +94,20 @@ const loadEntries = () => {
   catch { return []; }
 };
 
-export default function MiniVasili() {
-  const [view, setView]         = useState("chat");
-  const [entries, setEntries]   = useState(() => loadEntries());
-  const [title, setTitle]       = useState("");
-  const [content, setContent]   = useState("");
-  const [saving, setSaving]     = useState(false);
+export default function App() {
+  const [view, setView] = useState("chat");
+  const [entries, setEntries] = useState(() => loadEntries());
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [saving, setSaving] = useState(false);
   const [fileProc, setFileProc] = useState(false);
-  const fileRef                 = useRef(null);
+  const fileRef = useRef(null);
   const [messages, setMessages] = useState([
-    { role: "assistant", content: "Hallo! 👋 Ich bin euer interner Firmen-Assistent.\nStellt mir Fragen zu Produkten, Preisen oder internen Abläufen – ich helfe sofort!" }
+    { role: "assistant", content: "Hey! 👋 Ich bin Mini-Vasili – der digitale Vasili.\nFragt mich alles, was ihr sonst dem echten Vasili fragen würdet. Ich nerve nicht zurück! 😄" }
   ]);
-  const [input, setInput]           = useState("");
+  const [input, setInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-  const bottomRef                   = useRef(null);
+  const bottomRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, chatLoading]);
 
@@ -133,23 +129,12 @@ export default function MiniVasili() {
     try {
       const ext = file.name.split(".").pop().toLowerCase();
       let text = "";
-      if (ext === "docx") {
-        const res = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-        text = res.value;
-      } else if (["xlsx", "xls"].includes(ext)) {
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array" });
-        const parts = wb.SheetNames.map(name => {
-          const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1 });
-          const lines = rows
-            .filter(r => r.some(c => c !== null && c !== undefined && c !== ""))
-            .map(r => r.map(c => c ?? "").join("\t"));
-          return "--- Tabellenblatt: " + name + " ---\n" + lines.join("\n");
-        });
-        text = parts.join("\n\n");
-      } else if (["txt", "csv"].includes(ext)) {
+      if (ext === "txt" || ext === "csv") {
         text = await file.text();
-      } else { alert("Bitte .xlsx, .xls, .docx, .txt oder .csv verwenden."); return; }
+      } else {
+        alert("Bitte .txt oder .csv Dateien verwenden. Für Word und Excel: Inhalt kopieren und oben einfügen.");
+        return;
+      }
       if (!text.trim()) { alert("Datei ist leer."); return; }
       persist([...entries, { id: Date.now().toString(), title: file.name, content: text.trim(), date: new Date().toLocaleDateString("de-DE"), isFile: true }]);
     } catch { alert("Fehler beim Lesen der Datei."); }
@@ -159,9 +144,9 @@ export default function MiniVasili() {
   const deleteEntry = (id) => persist(entries.filter(e => e.id !== id));
 
   const buildSystem = () => {
-    if (!entries.length) return `Du bist Mini-Vasili. Deine Wissensbasis ist noch leer – der echte Vasili muss erst Infos eintragen. Sag dem Nutzer das locker und mit Humor. Antworte auf Deutsch.`;
+    if (!entries.length) return "Du bist Mini-Vasili. Deine Wissensbasis ist noch leer. Sag dem Nutzer das locker und mit Humor. Antworte auf Deutsch.";
     const kb = entries.map(e => `=== ${e.title} ===\n${e.content}`).join("\n\n---\n\n");
-    return `Du bist ein interner Firmen-Assistent für Mitarbeiter im Bereich Handel/Verkauf.\nBeantworte Fragen AUSSCHLIESSLICH auf Basis der folgenden Wissensbasis.\nWenn die Info fehlt, sage: "Diese Information liegt mir leider nicht vor."\nAntworte auf Deutsch, freundlich, klar und strukturiert.\n\nWISSENSBASIS:\n${kb}`;
+    return `Du bist Mini-Vasili – der digitale Assistent, der den echten Vasili ersetzt.\nDu bist freundlich, ein bisschen witzig, aber immer hilfreich und auf den Punkt.\nBeantworte Fragen AUSSCHLIESSLICH auf Basis der folgenden Wissensbasis.\nWenn eine Info fehlt: "Das weiß selbst ich nicht – frag vielleicht doch den echten Vasili 😄"\nAntworte auf Deutsch, kurz, klar und mit Charme.\n\nWISSENSBASIS:\n${kb}`;
   };
 
   const send = async () => {
@@ -170,26 +155,24 @@ export default function MiniVasili() {
     const msgs = [...messages, { role: "user", content: txt }];
     setMessages(msgs); setInput(""); setChatLoading(true);
     try {
-      // Skip initial greeting, map assistant→model for Gemini
-      const contents = msgs.slice(1).map(m => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      }));
-      const res = await fetch(GEMINI_URL, {
+      const res = await fetch(GROQ_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}` },
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: buildSystem() }] },
-          contents,
-          generationConfig: { maxOutputTokens: 1024 },
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: buildSystem() },
+            ...msgs.slice(1).map(m => ({ role: m.role, content: m.content }))
+          ],
+          max_tokens: 1024
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
-      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "Keine Antwort erhalten.";
+      const reply = data.choices?.[0]?.message?.content || "Keine Antwort erhalten.";
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
     } catch (e) {
-      setMessages(prev => [...prev, { role: "assistant", content: `⚠️ Fehler: ${e.message || "Verbindungsproblem."}` }]);
+      setMessages(prev => [...prev, { role: "assistant", content: `Fehler: ${e.message || "Verbindungsproblem."}` }]);
     } finally { setChatLoading(false); }
   };
 
@@ -207,15 +190,10 @@ export default function MiniVasili() {
             <div className="setup-card">
               <div className="setup-icon">🔑</div>
               <h2>API-Key fehlt</h2>
-              <p>
-                Füge in deinem <strong>Vercel-Dashboard</strong> unter<br />
-                <em>Settings → Environment Variables</em> hinzu:<br /><br />
-                Name: <span className="setup-code">VITE_GEMINI_API_KEY</span><br />
-                Wert: dein kostenloser Key von{" "}
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">aistudio.google.com</a>
-                <br /><br />
-                Danach <strong>Redeploy</strong> klicken – fertig! ✅
-              </p>
+              <p>Füge in Vercel unter <em>Settings → Environment Variables</em> hinzu:<br /><br />
+                Name: <span className="setup-code">VITE_GROQ_API_KEY</span><br />
+                Wert: Key von <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a><br /><br />
+                Dann <strong>Redeploy</strong> klicken ✅</p>
             </div>
           </div>
         </main>
@@ -237,30 +215,29 @@ export default function MiniVasili() {
           </nav>
           <div className="sidebar-foot">{entries.length === 0 ? "⚠️ Keine Daten gepflegt" : `✅ ${entries.length} Einträge aktiv`}</div>
         </aside>
-
         <main className="main">
           {view === "admin" && (
             <div className="admin">
-              <div className="page-head"><h2>Wissensbasis verwalten</h2><p>Füge Texte oder Dateien hinzu, auf die der Chatbot zugreift.</p></div>
+              <div className="page-head"><h2>Wissensbasis verwalten</h2><p>Füge Texte hinzu, auf die Mini-Vasili zugreift.</p></div>
               <div className="grid2">
                 <div className="card">
-                  <div className="card-title">📝 Text manuell eingeben</div>
-                  <div className="fg"><label>Titel / Thema</label><input className="inp" value={title} onChange={e => setTitle(e.target.value)} placeholder="z. B. Preisliste Sommer 2026" /></div>
-                  <div className="fg"><label>Inhalt</label><textarea className="inp" value={content} onChange={e => setContent(e.target.value)} placeholder="Texte, Preise, Produktinfos, Abläufe …" rows={7} /></div>
-                  <button className="btn-blue" onClick={addText} disabled={saving || !title.trim() || !content.trim()}>{saving ? "Speichert …" : "➕ Hinzufügen"}</button>
+                  <div className="card-title">📝 Text eingeben</div>
+                  <div className="fg"><label>Titel</label><input className="inp" value={title} onChange={e => setTitle(e.target.value)} placeholder="z. B. Preisliste 2026" /></div>
+                  <div className="fg"><label>Inhalt</label><textarea className="inp" value={content} onChange={e => setContent(e.target.value)} placeholder="Texte, Preise, Infos hier einfügen…" rows={7} /></div>
+                  <button className="btn-blue" onClick={addText} disabled={saving || !title.trim() || !content.trim()}>{saving ? "Speichert…" : "➕ Hinzufügen"}</button>
                 </div>
                 <div className="card">
-                  <div className="card-title">📁 Datei hochladen</div>
+                  <div className="card-title">📁 Textdatei hochladen</div>
                   <div className="drop" onClick={() => fileRef.current?.click()}>
-                    {fileProc ? <><div className="drop-icon">⏳</div><p className="drop-title">Wird verarbeitet …</p></> : <><div className="drop-icon">📤</div><p className="drop-title">Klicken zum Hochladen</p><p className="drop-fmts">Excel (.xlsx) · Word (.docx) · Text (.txt) · CSV (.csv)</p></>}
+                    {fileProc ? <><div className="drop-icon">⏳</div><p className="drop-title">Wird gelesen…</p></> : <><div className="drop-icon">📤</div><p className="drop-title">Klicken zum Hochladen</p><p className="drop-fmts">Text (.txt) · CSV (.csv)</p></>}
                   </div>
-                  <input ref={fileRef} type="file" accept=".xlsx,.xls,.docx,.txt,.csv" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
-                  <p className="file-tip">💡 PDFs bitte vorher als Word- oder Textdatei exportieren.</p>
+                  <input ref={fileRef} type="file" accept=".txt,.csv" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+                  <p className="file-tip">💡 Excel/Word: Inhalt kopieren und links einfügen.</p>
                 </div>
               </div>
               <div className="card">
-                <div className="card-title">📚 Gespeicherte Einträge ({entries.length})</div>
-                {entries.length === 0 ? <p className="empty-txt">Noch keine Einträge. Füge oben Informationen hinzu.</p> : (
+                <div className="card-title">📚 Einträge ({entries.length})</div>
+                {entries.length === 0 ? <p className="empty-txt">Noch leer. Füge oben Infos hinzu.</p> : (
                   <div className="entry-list">
                     {entries.map(e => (
                       <div className="entry" key={e.id}>
@@ -273,7 +250,6 @@ export default function MiniVasili() {
               </div>
             </div>
           )}
-
           {view === "chat" && (
             <div className="chat">
               <div className="chat-head">
@@ -281,7 +257,7 @@ export default function MiniVasili() {
                 <div><div className="chat-hname">Mini-Vasili</div><div className="chat-status">● Online · {entries.length} Infoquellen</div></div>
                 <button className="btn-ghost" onClick={resetChat}>↺ Neu starten</button>
               </div>
-              {entries.length === 0 && <div className="kb-warn">⚠️ Wissensbasis ist leer – gehe zu <strong>„Wissensbasis"</strong> und füge Informationen hinzu.</div>}
+              {entries.length === 0 && <div className="kb-warn">⚠️ Wissensbasis leer – gehe zu <strong>Wissensbasis</strong> und füge Infos hinzu.</div>}
               <div className="messages">
                 {messages.map((m, i) => (
                   <div key={i} className={`msg ${m.role}`}>
@@ -296,7 +272,7 @@ export default function MiniVasili() {
               <div className="input-bar">
                 <textarea className="chat-inp" value={input} onChange={e => setInput(e.target.value)}
                   onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }}}
-                  placeholder="Frage eingeben … (Enter zum Senden)" rows={1} disabled={chatLoading} />
+                  placeholder="Frage eingeben… (Enter senden)" rows={1} disabled={chatLoading} />
                 <button className="send-btn" onClick={send} disabled={chatLoading || !input.trim()}>➤</button>
               </div>
             </div>

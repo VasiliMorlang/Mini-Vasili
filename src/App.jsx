@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 
 const STORAGE_KEY = "firmenbot-kb-v1";
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`;
 
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');

@@ -1,8 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 
 const STORAGE_KEY = "firmenbot-kb-v1";
-const API_KEY = import.meta.env.VITE_GROQ_API_KEY || "";
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const EMBED_STORAGE_KEY = "minivasili-embeddings-v1";
+const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+const CHAT_MODEL = "gemini-2.5-flash";
+const EMBED_MODEL = "gemini-embedding-001";
+const CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/models/" + CHAT_MODEL + ":generateContent?key=" + API_KEY;
+const EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/" + EMBED_MODEL + ":embedContent?key=" + API_KEY;
+const EMBED_BATCH_URL = "https://generativelanguage.googleapis.com/v1beta/models/" + EMBED_MODEL + ":batchEmbedContents?key=" + API_KEY;
 const DRIVE_URL = "https://script.google.com/macros/s/AKfycbzMZopv6BoR0xKgUei7txo6XePZRRuPll2nU863L27JdF45q0Hfh2KP_5QE_KvnAHSsow/exec";
 
 const CSS = `
@@ -100,6 +105,91 @@ const loadLocal = () => {
   catch { return []; }
 };
 
+const loadEmbedCache = () => {
+  try { return JSON.parse(localStorage.getItem(EMBED_STORAGE_KEY) || "{}"); }
+  catch { return {}; }
+};
+
+// Teilt einen Text in kleinere, ueberlappungsfreie Abschnitte (max. ~700 Zeichen),
+// damit pro Frage nur die relevanten Stuecke statt der ganzen Wissensbasis verschickt werden.
+function chunkText(text, maxChars = 700) {
+  const paras = text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  if (!paras.length) return text.trim() ? [text.trim()] : [];
+  const chunks = [];
+  let buf = "";
+  for (let p of paras) {
+    while (p.length > maxChars) {
+      if (buf) { chunks.push(buf); buf = ""; }
+      chunks.push(p.slice(0, maxChars));
+      p = p.slice(maxChars);
+    }
+    if (buf && (buf.length + p.length + 2) > maxChars) {
+      chunks.push(buf);
+      buf = p;
+    } else {
+      buf = buf ? buf + "\n\n" + p : p;
+    }
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
+
+// Einfacher, schneller Hash um zu erkennen ob sich ein Eintrag seit dem letzten
+// Indexieren geaendert hat (dann muss er neu eingebettet werden, sonst nicht).
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; }
+  return h.toString(36) + ":" + str.length;
+}
+
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom ? dot / denom : 0;
+}
+
+// Embeddet mehrere Textabschnitte auf einmal (effizienter als einzeln) ueber Gemini.
+async function embedBatch(texts, taskType) {
+  const out = [];
+  for (let i = 0; i < texts.length; i += 90) {
+    const slice = texts.slice(i, i + 90);
+    const res = await fetch(EMBED_BATCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: slice.map(t => ({
+          model: "models/" + EMBED_MODEL,
+          content: { parts: [{ text: t.slice(0, 8000) }] },
+          taskType,
+          outputDimensionality: 768
+        }))
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    out.push(...data.embeddings.map(e => e.values || (e.embedding && e.embedding.values)));
+  }
+  return out;
+}
+
+// Embeddet die Nutzerfrage (separater Endpoint, da nur ein einzelner Text).
+async function embedOne(text, taskType) {
+  const res = await fetch(EMBED_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "models/" + EMBED_MODEL,
+      content: { parts: [{ text: text.slice(0, 8000) }] },
+      taskType,
+      outputDimensionality: 768
+    })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.embedding.values;
+}
+
 export default function App() {
   const [view, setView] = useState("chat");
   const [localEntries, setLocalEntries] = useState(() => loadLocal());
@@ -118,8 +208,55 @@ export default function App() {
   const bottomRef = useRef(null);
 
   const allEntries = [...driveEntries, ...localEntries];
+  const embedCacheRef = useRef(loadEmbedCache());
+  const indexingRef = useRef(false);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, chatLoading]);
+
+  // Baut/aktualisiert den Embedding-Index im Hintergrund, sobald sich die Wissensbasis aendert.
+  // Unveraenderte Eintraege werden per Hash erkannt und NICHT neu eingebettet (spart Tokens/Zeit).
+  useEffect(() => {
+    if (allEntries.length) ensureIndex(allEntries).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driveEntries, localEntries]);
+
+  async function ensureIndex(entries) {
+    if (indexingRef.current) return embedCacheRef.current;
+    indexingRef.current = true;
+    try {
+      const cache = embedCacheRef.current;
+      const validIds = new Set();
+      for (const e of entries) {
+        validIds.add(e.id);
+        const h = simpleHash(e.content);
+        if (cache[e.id] && cache[e.id].hash === h) continue;
+        const chunks = chunkText(e.content);
+        if (!chunks.length) continue;
+        const vectors = await embedBatch(chunks, "RETRIEVAL_DOCUMENT");
+        cache[e.id] = { hash: h, title: e.title, chunks: chunks.map((text, i) => ({ text, vec: vectors[i] })) };
+      }
+      for (const id of Object.keys(cache)) { if (!validIds.has(id)) delete cache[id]; }
+      try { localStorage.setItem(EMBED_STORAGE_KEY, JSON.stringify(cache)); } catch (e) {}
+      return cache;
+    } finally {
+      indexingRef.current = false;
+    }
+  }
+
+  // Sucht die zur Frage passendsten Wissensbasis-Ausschnitte statt alles zu verschicken.
+  async function getRelevantContext(question, entries, topK = 6) {
+    const cache = await ensureIndex(entries);
+    const qVec = await embedOne(question, "RETRIEVAL_QUERY");
+    const scored = [];
+    for (const id of Object.keys(cache)) {
+      const entry = cache[id];
+      for (const c of entry.chunks) scored.push({ title: entry.title, text: c.text, score: cosineSim(qVec, c.vec) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, topK);
+    if (!top.length) return "";
+    return top.map(t => "=== " + t.title + " ===\n" + t.text).join("\n\n---\n\n");
+  }
 
   const loadDrive = async () => {
     setDriveLoading(true);
@@ -172,10 +309,12 @@ export default function App() {
 
   const deleteLocal = (id) => persistLocal(localEntries.filter(e => e.id !== id));
 
-  const buildSystem = () => {
+  const buildSystem = (context) => {
     if (!allEntries.length) return "Du bist Mini-Vasili. Deine Wissensbasis ist noch leer. Sag es locker und mit Humor. Antworte auf Deutsch.";
-    const kb = allEntries.map(e => "=== " + e.title + " ===\n" + e.content).join("\n\n---\n\n");
-    return "Du bist Mini-Vasili, der digitale Assistent von Vasili.\nSei freundlich, witzig aber hilfreich.\nBeantworte Fragen NUR auf Basis der Wissensbasis.\nWenn Info fehlt: Das weiss ich leider nicht, frag den echten Vasili.\nAntworte auf Deutsch.\n\nWISSENSBASIS:\n" + kb;
+    const kb = (context && context.trim())
+      ? context
+      : allEntries.map(e => "=== " + e.title + " ===\n" + e.content).join("\n\n---\n\n");
+    return "Du bist Mini-Vasili, der digitale Assistent von Vasili.\nSei freundlich, witzig aber hilfreich.\nBeantworte Fragen NUR auf Basis der folgenden Wissensbasis-Ausschnitte (das sind die zur Frage passendsten Stellen, nicht zwingend die komplette Wissensbasis).\nWenn Info fehlt: Das weiss ich leider nicht, frag den echten Vasili.\nAntworte auf Deutsch.\n\nWISSENSBASIS-AUSSCHNITTE:\n" + kb;
   };
 
   const send = async () => {
@@ -184,18 +323,35 @@ export default function App() {
     const msgs = [...messages, { role: "user", content: txt }];
     setMessages(msgs); setInput(""); setChatLoading(true);
     try {
-      const res = await fetch(GROQ_URL, {
+      let systemText;
+      if (!allEntries.length) {
+        systemText = buildSystem();
+      } else {
+        try {
+          const context = await getRelevantContext(txt, allEntries);
+          systemText = buildSystem(context);
+        } catch (ragErr) {
+          // Falls die Embedding-Suche mal ausfaellt: Notloesung mit der vollen Wissensbasis,
+          // damit der Bot trotzdem antwortet (kostet dann mehr Tokens, aber funktioniert).
+          systemText = buildSystem();
+        }
+      }
+      const history = msgs.slice(1).map(m => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }]
+      }));
+      const res = await fetch(CHAT_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + API_KEY },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [{ role: "system", content: buildSystem() }, ...msgs.slice(1).map(m => ({ role: m.role, content: m.content }))],
-          max_tokens: 1024
+          system_instruction: { parts: [{ text: systemText }] },
+          contents: history,
+          generationConfig: { maxOutputTokens: 1024 }
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
-      const reply = data.choices[0].message.content;
+      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "Keine Antwort erhalten.";
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
     } catch (e) {
       setMessages(prev => [...prev, { role: "assistant", content: "Fehler: " + (e.message || "Verbindungsproblem.") }]);
@@ -225,8 +381,8 @@ export default function App() {
                 <h2>API-Key fehlt</h2>
                 <p>
                   Vercel Dashboard, Settings, Environment Variables:<br /><br />
-                  Name: <span className="setup-code">VITE_GROQ_API_KEY</span><br />
-                  Key von <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a><br /><br />
+                  Name: <span className="setup-code">VITE_GEMINI_API_KEY</span><br />
+                  Key von <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">aistudio.google.com</a><br /><br />
                   Dann Redeploy klicken.
                 </p>
               </div>
